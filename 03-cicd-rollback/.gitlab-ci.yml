@@ -1,0 +1,113 @@
+# GitLab CI: test -> build+scan -> push -> deploy (manual gate) -> smoke test.
+#
+# The one decision that makes rollback possible: every image is tagged with the
+# commit SHA. Pushing only ":latest" overwrites the previous artifact, so when a
+# deploy breaks there is nothing to return to.
+
+stages: [test, build, deploy]
+
+variables:
+  IMAGE_SHA: $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  IMAGE_LATEST: $CI_REGISTRY_IMAGE:latest
+  DOCKER_BUILDKIT: "1"
+
+default:
+  interruptible: true       # a new push cancels the stale pipeline instead of racing it
+
+# ---------------------------------------------------------------- test
+test:
+  stage: test
+  image: node:20.18-alpine
+  cache:
+    key:
+      files: [package-lock.json]    # keyed on the lockfile, not the branch:
+    paths: [.npm/]                  # a stale cache is worse than no cache
+  script:
+    - npm ci --cache .npm --prefer-offline
+    - npm run lint --if-present
+    - npm test
+  coverage: '/All files\s*\|\s*([\d.]+)/'
+
+# ---------------------------------------------------------------- build
+build:
+  stage: build
+  image: docker:27.3
+  services: [docker:27.3-dind]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script:
+    # --password-stdin, never as an argv argument where it lands in process listings
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" --password-stdin "$CI_REGISTRY"
+  script:
+    - docker build --cache-from "$IMAGE_LATEST" -t "$IMAGE_SHA" -t "$IMAGE_LATEST" .
+
+    # Fail the build on a CRITICAL CVE. --ignore-unfixed avoids blocking on
+    # findings with no available patch; drop that flag if your policy is stricter.
+    - |
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        aquasec/trivy:latest image \
+          --exit-code 1 --severity CRITICAL --ignore-unfixed \
+          "$IMAGE_SHA"
+
+    - docker push "$IMAGE_SHA"
+    - docker push "$IMAGE_LATEST"
+  artifacts:
+    reports:
+      dotenv: build.env
+
+# ---------------------------------------------------------------- deploy
+.ssh_setup: &ssh_setup
+  - apk add --no-cache openssh-client curl
+  - eval "$(ssh-agent -s)"
+  # SSH_PRIVATE_KEY is a masked File-type CI variable holding a DEDICATED deploy
+  # key, never a personal one. It can be revoked on its own.
+  - chmod 600 "$SSH_PRIVATE_KEY" && ssh-add "$SSH_PRIVATE_KEY"
+  - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+  # Pin the host key. StrictHostKeyChecking=no disables MITM protection entirely.
+  - echo "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+
+deploy:staging:
+  stage: deploy
+  image: docker:27.3
+  environment:
+    name: staging
+    url: https://staging.example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script: *ssh_setup
+  script:
+    - ssh "$DEPLOY_USER@$STAGING_HOST" "cd /opt/app && ./deploy.sh $IMAGE_SHA"
+
+deploy:production:
+  stage: deploy
+  image: docker:27.3
+  environment:
+    name: production
+    url: https://example.com
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual        # a human clicks. Nothing reaches production on its own.
+  allow_failure: false
+  before_script: *ssh_setup
+  script:
+    # deploy.sh waits for /health and calls rollback.sh itself if health never
+    # arrives, so a bad release does not sit broken waiting to be noticed.
+    - ssh "$DEPLOY_USER@$PROD_HOST" "cd /opt/app && ./deploy.sh $IMAGE_SHA"
+    - sleep 5
+    - curl -fsS --max-time 10 https://example.com/health
+
+# Manual escape hatch. Run this job with TARGET_IMAGE set to any previously
+# pushed SHA tag, or leave it empty to use the server's recorded .last_good.
+rollback:production:
+  stage: deploy
+  image: docker:27.3
+  environment:
+    name: production
+    url: https://example.com
+  when: manual
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  before_script: *ssh_setup
+  script:
+    - ssh "$DEPLOY_USER@$PROD_HOST" "cd /opt/app && ./rollback.sh ${TARGET_IMAGE:-}"

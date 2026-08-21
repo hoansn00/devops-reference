@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+certs/
+.last_good
+.last_good.candidate
+.current
+.env.image
+node_modules/

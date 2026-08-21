@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+  labels: { app: myapp }
+spec:
+  type: ClusterIP        # public exposure is the Ingress's job, not the Service's
+  selector: { app: myapp }
+  ports:
+    - name: http
+      port: 80
+      targetPort: http   # named, so changing the container port does not break this

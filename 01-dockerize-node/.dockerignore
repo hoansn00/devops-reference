@@ -1,0 +1,19 @@
+# Without this file, .git and .env are copied into the image — your commit
+# history and your secrets, permanently, in a layer you cannot delete.
+.git
+.gitignore
+node_modules
+dist
+build
+coverage
+.env
+.env.*
+!.env.example
+npm-debug.log*
+Dockerfile
+docker-compose*.yml
+.dockerignore
+README.md
+.vscode
+.idea
+*.md

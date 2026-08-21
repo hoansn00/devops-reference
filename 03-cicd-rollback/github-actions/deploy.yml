@@ -1,0 +1,93 @@
+# .github/workflows/deploy.yml
+# Same shape as the GitLab pipeline: immutable SHA tags, scan, manual production
+# gate via an Environment protection rule, and automatic rollback on failed health.
+
+name: build and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true      # a new push supersedes the stale run
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.18'
+          cache: npm            # keyed on the lockfile automatically
+      - run: npm ci
+      - run: npm run lint --if-present
+      - run: npm test
+
+  build:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write           # least privilege: only what pushing needs
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: meta
+        run: echo "image=${IMAGE}:${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan for critical CVEs
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    # Add required reviewers to this Environment in repo settings — that is what
+    # turns this into a manual gate. Without it, main deploys itself.
+    environment:
+      name: production
+      url: https://example.com
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}   # dedicated, restricted deploy key
+          script: cd /opt/app && ./deploy.sh ${{ needs.build.outputs.image }}
+
+      - name: Smoke test
+        run: |
+          sleep 5
+          curl -fsS --max-time 10 https://example.com/health

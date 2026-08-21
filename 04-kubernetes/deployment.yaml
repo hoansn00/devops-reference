@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+  labels: { app: myapp }
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5      # keeps 5 old ReplicaSets for `kubectl rollout undo`
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0        # 0 = never drop below `replicas` during a rollout
+  selector:
+    matchLabels: { app: myapp }
+  template:
+    metadata:
+      labels: { app: myapp }
+    spec:
+      # Give the app time to finish in-flight requests. Must exceed the longest
+      # expected request, or a rollout returns 502s to real users.
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+
+      # Spread replicas across nodes. Without this, all three can land on one
+      # node and a single node failure is a full outage.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels: { app: myapp }
+
+      containers:
+        - name: app
+          # Immutable tag. ":latest" makes `rollout undo` meaningless, because the
+          # tag resolves to whatever was pushed last on every node pull.
+          image: registry.example.com/myapp:9f3c1ab
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 3000
+
+          envFrom:
+            - secretRef: { name: myapp-secrets }
+            - configMapRef: { name: myapp-config }
+
+          # Three probes, three different jobs:
+          #   startup   — allow a slow boot without liveness killing it in a loop
+          #   readiness — remove from Service endpoints while unable to serve
+          #   liveness  — restart only when genuinely wedged
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 3
+            failureThreshold: 30        # up to 90s to boot
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          resources:
+            # requests = what the scheduler reserves; limits = the hard ceiling.
+            # No CPU limit on purpose: CPU limits cause throttling that looks like
+            # a latency bug. Memory has a limit because a leak must not take the node.
+            requests: { cpu: 100m, memory: 192Mi }
+            limits:  { memory: 512Mi }
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+
+          # readOnlyRootFilesystem needs writable mounts for anything that writes
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+            - { name: cache, mountPath: /app/.cache }
+
+          lifecycle:
+            preStop:
+              # Pause so the endpoint removal propagates through kube-proxy before
+              # the process starts shutting down. Without it, a few requests are
+              # routed to a pod that is already exiting.
+              exec: { command: ["sleep", "5"] }
+
+      volumes:
+        - { name: tmp, emptyDir: {} }
+        - { name: cache, emptyDir: {} }
