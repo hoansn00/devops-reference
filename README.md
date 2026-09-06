@@ -12,7 +12,7 @@ Jenkins, ArgoCD and Terraform in production.
 | [01-dockerize-node](01-dockerize-node/) | Multi-stage build, non-root user, healthcheck, correct signal handling, log rotation |
 | [02-deploy-vps](02-deploy-vps/) | Server hardening, Nginx reverse proxy, Let's Encrypt, backups with a **tested restore** |
 | [03-cicd-rollback](03-cicd-rollback/) | Immutable image tags and a rollback that actually works — GitLab CI and GitHub Actions |
-| [04-kubernetes](04-kubernetes/) | Probes, resource limits, PDB, HPA, rolling update with zero dropped requests |
+| [04-kubernetes](04-kubernetes/) | Probes, resource limits, PDB, HPA, rolling updates — measured on a real cluster, see VERIFICATION.md |
 
 ## The four things most setups get wrong
 

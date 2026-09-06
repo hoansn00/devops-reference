@@ -1,8 +1,11 @@
 # 04 — Kubernetes manifests for a real service
 
-A small but complete deployment: rolling updates that drop no requests, correct probes,
-disruption budget, autoscaling, and a default-deny network policy. Plain YAML rather than Helm
-so each decision is visible.
+A small but complete deployment: rolling updates, correct probes, a disruption budget,
+autoscaling, and a default-deny network policy. Plain YAML rather than Helm so each decision
+is visible.
+
+This was applied to a real GKE cluster and the behaviour measured rather than assumed —
+including the parts that did not behave as intended. See [VERIFICATION.md](VERIFICATION.md).
 
 ## Apply
 
@@ -61,13 +64,30 @@ kubectl get pods -o wide                  # confirm they are on different nodes
 kubectl get hpa myapp                     # must show a real percentage, not <unknown>
 kubectl describe pdb myapp
 
-# rolling update with no dropped requests — run a load generator against the
-# Ingress, then trigger a rollout and watch for non-200s
+# rolling update under load — run a load generator against the Service, then trigger
+# a rollout and count non-200s. Measure it; do not assume it is zero (see VERIFICATION.md)
 kubectl set image deploy/myapp app=registry.example.com/myapp:<new-sha>
 kubectl rollout status deploy/myapp
 
 kubectl rollout undo deploy/myapp         # and confirm undo works before you need it
 ```
+
+## What the verification run actually showed
+
+Two things worth knowing before you copy these manifests:
+
+**The pod spread is a preference, not a guarantee.** On first deploy the three replicas
+landed one per node. After several rollouts they bunched 2+1 and left a node empty — correct
+behaviour for `whenUnsatisfiable: ScheduleAnyway`. Use `DoNotSchedule` if you need the
+guarantee, and accept that pods will stay Pending when it cannot be met.
+
+**Rolling updates were not measurably zero-downtime here.** Across three runs, roughly 0.5%
+of new connections failed during the pod-replacement window. DNS was ruled out (failures
+persisted when hitting the ClusterIP directly) and so was endpoint propagation (raising
+`preStop` from 5s to 20s changed nothing). The most likely remaining cause is that the
+stand-in test image does not drain in-flight connections on SIGTERM — an application with a
+graceful HTTP shutdown should close the gap. That has not been verified, so no zero-downtime
+claim is made.
 
 ## When not to use this
 
