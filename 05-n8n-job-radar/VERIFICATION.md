@@ -95,13 +95,37 @@ Dry-run before deploying:
 First live run afterwards: 54 posts read, **7 kept** instead of the 54 that used to pass the
 old `score >= 1` gate.
 
+### Tightening the filter silently killed the alerts
+
+After the new scoring went in, the pipeline read 54 posts and kept 7 — exactly as intended —
+and then sent nothing, run after run. `Format alert` never executed.
+
+The dedupe node sits *after* the filter and remembers every link it has already passed, across
+executions. Those 7 posts had gone through days earlier, back when the threshold was `score >= 1`
+and everything qualified. They were already in the history, so tightening the filter did not
+surface them — it guaranteed they would never be sent.
+
+Anything that changes what a filter lets through has to be paired with clearing the dedupe
+history behind it, or the newly-qualifying backlog stays suppressed permanently.
+
+Cleared it (`clearDeduplicationHistory`, one run, then back to
+`removeItemsSeenInPreviousExecutions`), and the next run delivered:
+
+```
+Normalize & score  items=7    106ms
+Keyword match?     items=7     10ms
+Seen before?       items=7     60ms
+Format alert       items=7     66ms
+Telegram alert     items=7   4959ms   ok=true, message_id 12-18
+```
+
+Seven alerts, seven `message_id`s. End to end, on the schedule trigger, unattended.
+
 ## Not verified — no claim made
-- Behaviour over a long window. The tightened filter has one live run behind it, not a week.
+- Behaviour over a long window. The tightened filter has a handful of live runs behind it, not a week.
+- Alert volume in steady state. The 7 above were a cleared backlog, not a normal 15-minute tick.
 - Upwork as a source. Its RSS endpoint is gone (HTTP 410) and the job search sits behind a
   Cloudflare challenge that blocks both plain fetches and an automated browser. Not bypassed —
   Upwork's own saved-search alerts are the supported route.
 - Behaviour under a feed outage. `continueRegularOutput` is set on the RSS node but no feed
   failed during these runs.
-- An end-to-end alert. Telegram delivery is proven and the filter is proven, but the two have
-  not yet coincided: since the filter was tightened every kept post had already been seen on an
-  earlier run, so no new alert has fired yet.
