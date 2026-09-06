@@ -1,0 +1,251 @@
+{
+  "name": "Freelance Job Radar",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Freelance Job Radar\nPolls 3 public job feeds every 15 min → normalizes fields → scores each post against a DevOps keyword list → drops anything already seen in earlier runs → pushes a formatted alert to Telegram.\nOne failing feed never blocks the others (RSS node set to continue on error). Zero external services besides Telegram; runs on a self-hosted n8n.",
+        "height": 130,
+        "width": 1560,
+        "color": 4
+      },
+      "id": "n0",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        48
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "n1",
+      "name": "Every 15 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  { json: { source: 'Freelancer.com',   url: 'https://www.freelancer.com/rss.xml' } },\n  { json: { source: 'We Work Remotely', url: 'https://weworkremotely.com/categories/remote-devops-sysadmin-jobs.rss' } },\n  { json: { source: 'HN Jobs',          url: 'https://hnrss.org/jobs' } },\n];"
+      },
+      "id": "n2",
+      "name": "Feed list",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {}
+      },
+      "id": "n3",
+      "name": "Read RSS",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.2,
+      "position": [
+        448,
+        304
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tiered keywords: a generic word alone must not qualify a job.\nconst STRONG = ['kubernetes','k8s','terraform','ansible','argocd','argo cd','helm','rancher','harbor',\n  'vault','gitlab','jenkins','github actions','docker','docker compose','self-hosted','self hosted',\n  'vps','nginx','apache','haproxy','traefik','caddy','sre','prometheus','grafana','ci/cd','cicd',\n  'proxmox','n8n','devops','sysadmin','system administrator','load balancer','plesk','cpanel'];\n\nconst WEAK = ['linux','ubuntu','debian','centos','aws','gcp','azure','ssl','tls','cloudflare',\n  'postgres','postgresql','mysql','mariadb','redis','mongodb','infrastructure','deployment','deploy',\n  'automation','server','monitoring','backup','migration','hardening','firewall','ssh','dns',\n  'bash','systemd','cron'];\n\n// Hard drop: ad fraud, engagement farming, bot work. Never worth bidding on.\nconst NEGATIVE = ['ad view','ad viewer','ad-viewing','ad viewing','viewing ads','watch ads','watching ads',\n  'click bot','clickbot','auto click','autoclick','bot farm','fake account','followers','captcha',\n  'airdrop','crypto mining','mining rig','spam bot','engagement bot','view bot'];\n\nconst MIN_SCORE      = 4;   // one strong hit in the body (3) is not enough on its own\nconst MIN_BUDGET_USD = 80;  // matches the fixed-price floor\nconst MIN_HOURLY_USD = 15;\n\n// Rough FX, only used to reject obviously tiny budgets. Not accounting-grade.\nconst FX = {USD:1,EUR:1.09,GBP:1.27,AUD:0.65,CAD:0.73,NZD:0.60,SGD:0.74,HKD:0.128,CHF:1.12,\n  INR:0.012,PKR:0.0036,BDT:0.0084,LKR:0.0033,PHP:0.017,MYR:0.22,THB:0.029,IDR:0.000062,VND:0.00004,\n  CNY:0.14,JPY:0.0065,KRW:0.00073,TWD:0.031,AED:0.27,SAR:0.27,ILS:0.27,ZAR:0.055,NGN:0.00065,\n  BRL:0.18,MXN:0.05,ARS:0.001,CLP:0.001,COP:0.00025,PLN:0.25,SEK:0.095,DKK:0.145,NOK:0.09,\n  CZK:0.043,RON:0.22,HUF:0.0028,TRY:0.029,RUB:0.011,UAH:0.024,EGP:0.021};\n\nconst ENT = {'&nbsp;':' ','&amp;':'&','&lt;':'<','&gt;':'>','&quot;':'\"','&#39;':\"'\"};\nconst strip = s => String(s || '').replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;|&amp;|&lt;|&gt;|&quot;|&#39;/g, m => ENT[m]).replace(/\\s+/g, ' ').trim();\nconst escRe = s => s.replace(/[.*+?^${}()|[\\]\\\\\\/]/g, '\\\\$&');\nconst rx = k => new RegExp('(^|[^a-z0-9])' + escRe(k) + '(?![a-z0-9])', 'i');\nconst RX_STRONG = STRONG.map(k => [k, rx(k)]);\nconst RX_WEAK   = WEAK.map(k => [k, rx(k)]);\nconst RX_NEG    = NEGATIVE.map(k => [k, rx(k)]);\nconst hostOf = u => (String(u).match(/^https?:\\/\\/([^\\/:?#]+)/i) || [])[1] || '';\n\n// \"Budget: ₹100 - ₹400 INR\" / \"$250 - $750 USD\" -> {usd, hourly} or null when absent\nfunction budgetUsd(text) {\n  const m = text.match(/Budget:\\s*([^)]*?)(?:,\\s*Jobs:|\\)|$)/i);\n  if (!m) return null;\n  const raw = m[1].trim();\n  const cur = (raw.match(/\\b([A-Z]{3})\\b/) || [])[1];\n  const rate = cur && FX[cur] !== undefined ? FX[cur] : null;\n  const nums = (raw.match(/[\\d][\\d,.]*/g) || [])\n    .map(n => parseFloat(n.replace(/,/g, ''))).filter(n => !isNaN(n));\n  if (!nums.length || rate === null) return { raw, usd: null, hourly: /hour|hr\\b/i.test(raw) };\n  return { raw, usd: Math.max(...nums) * rate, hourly: /hour|hr\\b/i.test(raw) };\n}\n\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  if (!j.link) continue;\n\n  const host = hostOf(j.link).toLowerCase();\n  let source = host || 'unknown';\n  if (host.includes('freelancer.com')) source = 'Freelancer.com';\n  else if (host.includes('weworkremotely')) source = 'We Work Remotely';\n  else if (String(j.comments || '').includes('news.ycombinator.com') || host.includes('ycombinator')) source = 'HN Jobs';\n\n  const title = strip(j.title);\n  const desc  = strip(j['content:encoded'] || j.content || j.contentSnippet || j.description || '');\n  const hay   = title + ' ' + desc;\n\n  const neg = RX_NEG.filter(([k, r]) => r.test(hay)).map(([k]) => k);\n  if (neg.length) continue;                       // ad fraud / bot farming: drop outright\n\n  const sTitle = RX_STRONG.filter(([k, r]) => r.test(title)).map(([k]) => k);\n  const sBody  = RX_STRONG.filter(([k, r]) => r.test(desc)).map(([k]) => k);\n  const strong = [...new Set([...sTitle, ...sBody])];\n  if (!strong.length) continue;                   // a generic word alone never qualifies\n\n  const wTitle = RX_WEAK.filter(([k, r]) => r.test(title)).map(([k]) => k);\n  const wBody  = RX_WEAK.filter(([k, r]) => r.test(desc)).map(([k]) => k);\n  const weak   = [...new Set([...wTitle, ...wBody])];\n\n  const score = sTitle.length * 6 + (sBody.length - sTitle.filter(k => sBody.includes(k)).length) * 3\n              + wTitle.length * 2 + (wBody.length - wTitle.filter(k => wBody.includes(k)).length) * 1;\n  if (score < MIN_SCORE) continue;\n\n  const b = budgetUsd(desc);\n  if (b && b.usd !== null) {\n    const floor = b.hourly ? MIN_HOURLY_USD : MIN_BUDGET_USD;\n    if (b.usd < floor) continue;                  // below the floor we agreed; not worth Connects\n  }\n\n  out.push({ json: {\n    source, title, link: j.link,\n    type: source === 'Freelancer.com' ? 'Freelance' : (j.type || 'Full-time'),\n    budget: b ? b.raw : null,\n    budgetUsd: b && b.usd !== null ? Math.round(b.usd) : null,\n    published: j.isoDate || j.pubDate || null,\n    summary: desc.slice(0, 280),\n    matched: [...strong, ...weak], strong, score,\n  }});\n}\nreturn out;\n"
+      },
+      "id": "n4",
+      "name": "Normalize & score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        672,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.score }}",
+              "rightValue": 4,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "n5",
+      "name": "Keyword match?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "removeItemsSeenInPreviousExecutions",
+        "dedupeValue": "={{ $json.link }}",
+        "options": {
+          "historySize": 2000
+        }
+      },
+      "id": "n6",
+      "name": "Seen before?",
+      "type": "n8n-nodes-base.removeDuplicates",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $input.item.json;\nconst esc = s => String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');\nconst flag = j.score >= 4 ? '🔥' : '🟢';\nconst meta = [j.source, j.type, j.budget].filter(Boolean).join(' · ');\nconst message = [\n  `${flag} <b>${esc(j.title)}</b>`,\n  esc(meta),\n  `Matched: ${esc(j.matched.join(', '))}`,\n  '',\n  esc(j.summary),\n  '',\n  j.link,\n].join('\\n');\nreturn { json: { ...j, message } };"
+      },
+      "id": "n7",
+      "name": "Format alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1328,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "REPLACE_WITH_CHAT_ID",
+        "text": "={{ $json.message }}",
+        "additionalFields": {
+          "disable_web_page_preview": true,
+          "parse_mode": "HTML"
+        },
+        "resource": "message",
+        "operation": "sendMessage"
+      },
+      "id": "n8",
+      "name": "Telegram alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1552,
+        304
+      ]
+    }
+  ],
+  "connections": {
+    "Every 15 min": {
+      "main": [
+        [
+          {
+            "node": "Feed list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feed list": {
+      "main": [
+        [
+          {
+            "node": "Read RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS": {
+      "main": [
+        [
+          {
+            "node": "Normalize & score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & score": {
+      "main": [
+        [
+          {
+            "node": "Keyword match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keyword match?": {
+      "main": [
+        [
+          {
+            "node": "Seen before?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seen before?": {
+      "main": [
+        [
+          {
+            "node": "Format alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format alert": {
+      "main": [
+        [
+          {
+            "node": "Telegram alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "saveManualExecutions": true,
+    "timezone": "Asia/Ho_Chi_Minh",
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

@@ -1,7 +1,7 @@
 # DevOps reference setups
 
 Working configurations I use on real deployments — Docker, VPS provisioning, CI/CD with
-rollback, and Kubernetes. Each folder runs on its own and explains **why** each decision was
+rollback, Kubernetes, and self-hosted automation. Each folder runs on its own and explains **why** each decision was
 made, not just what to type.
 
 I am a Technical Architect (ex-DevOps) working with Linux, Docker, Kubernetes, GitLab CI,
@@ -13,6 +13,7 @@ Jenkins, ArgoCD and Terraform in production.
 | [02-deploy-vps](02-deploy-vps/) | Server hardening, Nginx reverse proxy, Let's Encrypt, backups with a **tested restore** |
 | [03-cicd-rollback](03-cicd-rollback/) | Immutable image tags and a rollback that actually works — GitLab CI and GitHub Actions |
 | [04-kubernetes](04-kubernetes/) | Probes, resource limits, PDB, HPA, rolling updates — measured on a real cluster, see VERIFICATION.md |
+| [05-n8n-job-radar](05-n8n-job-radar/) | Self-hosted n8n — Postgres 17, Caddy TLS, tested restore — running a multi-feed job alert workflow with cross-run dedupe |
 
 ## The four things most setups get wrong
 

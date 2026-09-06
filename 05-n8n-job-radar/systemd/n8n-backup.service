@@ -1,0 +1,11 @@
+[Unit]
+Description=n8n daily backup (pg_dump + data volume)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/n8n
+ExecStart=/opt/n8n/backup.sh
+StandardOutput=append:/opt/n8n/backups/backup.log
+StandardError=append:/opt/n8n/backups/backup.log
